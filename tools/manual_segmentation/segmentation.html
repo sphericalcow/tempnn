@@ -1,0 +1,257 @@
+<html>
+
+<head>
+   <link rel="shortcut icon" href="about:blank">
+   <script>
+      var CanvasState = Object.freeze({"Uninitialized":0, "Ready":1, "Drawing":2, "Done":3});
+
+
+      var Segmentation = function(image_canvas_id, segment_canvas_id) {
+         var self = this;
+
+         self._image_canvas = document.getElementById(image_canvas_id);
+         self._image_ctx = self._image_canvas.getContext('2d');
+
+         self._segment_canvas = document.getElementById(segment_canvas_id);
+         self._segment_ctx = self._segment_canvas.getContext('2d');
+         self._segment_ctx.lineWidth = 5;
+         self._segment_ctx.strokeStyle = "rgba(200, 50, 50, 0.75)";
+         self._segment_ctx.fillStyle = "rgba(200, 200, 250, 0.75)";
+
+
+         self._nodes = [];
+         self._state = CanvasState.Uninitialized;
+      };
+
+      Segmentation.prototype.segmentationCanvas = function() {
+         var self = this;
+         return self._segment_canvas;
+      };
+
+      Segmentation.prototype.reload = function(image_path, then) {
+         var self = this;
+
+         self._nodes = [];
+         self._state = CanvasState.Uninitialized;
+         self._segment_ctx.clearRect(0, 0, self._segment_canvas.width, self._segment_canvas.height);
+         self._image_ctx.clearRect(0, 0, self._image_canvas.width, self._image_canvas.height);
+
+         var img = new Image();
+         img.onload = function() { 
+            self._image_ctx.drawImage(img, 0, 0, self._image_canvas.width, self._image_canvas.height);
+            self._state = CanvasState.Ready;
+            if (then) {
+               then(self);
+            }
+         };
+         img.src = image_path;
+         self._state = CanvasState.Ready;
+      };
+
+      Segmentation.prototype.reset = function() {
+         var self = this;
+         if (self._state != CanvasState.Uninitialized) {
+            self._nodes = [];
+            self._state = CanvasState.Ready;
+            self._segment_ctx.clearRect(0, 0, self._segment_canvas.width, self._segment_canvas.height);
+         };
+      };
+
+      Segmentation.prototype.tempPoint = function(x, y) {
+         var self = this;
+         if (self._state == CanvasState.Drawing) {
+            self._redrawSegment();
+            self._lineTo(x, y);
+         }
+      };
+
+      Segmentation.prototype.keepPoint = function(x, y) {
+         var self = this;
+         if (self._state == CanvasState.Ready) {
+            self._state = CanvasState.Drawing;
+            self._nodes = [[x, y]];
+            self._segment_ctx.beginPath();
+            self._segment_ctx.moveTo(x, y);
+         } else if (self._state == CanvasState.Drawing) {
+            self._nodes.push([x, y]);
+            self._lineTo(x, y);
+         }
+      };
+
+      Segmentation.prototype.onDone = function() {
+         var self = this;
+         if (self._state == CanvasState.Drawing) {
+            self._state = CanvasState.Done;
+            self._lineTo(self._nodes[0][0], self._nodes[0][1]);
+            self._segment_ctx.closePath();
+            self._segment_ctx.fill();
+
+            return {boundary: self._nodes,
+                    mask: self._segment_canvas.toDataURL("image/png")};
+         }
+         return {boundary: [], mask: null};
+      };
+
+      Segmentation.prototype._lineTo = function(x, y) {
+         var self = this;
+         self._segment_ctx.lineTo(x, y);
+         self._segment_ctx.stroke();
+      };
+
+      Segmentation.prototype._redrawSegment = function() {
+         var self = this;
+         self._segment_ctx.clearRect(0, 0, self._segment_canvas.width, self._segment_canvas.height);
+         self._segment_ctx.beginPath();
+         self._segment_ctx.moveTo(self._nodes[0][0], self._nodes[0][1]);
+         for (var i = 1; i < self._nodes.length; ++i) {
+            self._lineTo(self._nodes[i][0], self._nodes[i][1]);
+         }
+      };
+
+
+
+
+      var CurrImage = function(segmentation) {
+         var self = this;
+         self._segmentation = segmentation;
+         self._image_name = null;
+      };
+
+      CurrImage.prototype.requestImage = function() {
+         var self = this;
+         var req = new XMLHttpRequest();
+         req.open("POST", "/next", true);
+         req.onload = function(e) {
+            self._image_name = req.response;
+            self._segmentation.reload(self._image_name, function() { initSegmentationCanvas(self._segmentation); });
+            document.getElementById('imageName').innerHTML = self._image_name;
+         };
+         req.send(null);
+      };
+
+      CurrImage.prototype.sendMask = function(points) {
+         var self = this;
+         var req = new XMLHttpRequest();
+         req.open("POST", "/set_mask", true);
+         req.onload = function(e) {
+            self.requestImage();
+         };
+         req.send(JSON.stringify({'name': self._image_name, 'points': points}));
+      };
+
+
+      var curr_image = null;
+
+
+
+      var initSegmentationCanvas = function(segmentation) {
+         var canvas = segmentation.segmentationCanvas();
+
+         var onDone = function() {
+            var result = segmentation.onDone();
+            if (confirm('Keep segmentation?')) { 
+               curr_image.sendMask(result.boundary);;
+            } else {
+               segmentation.reset();
+            }
+         };
+
+         canvas.onclick = function(event) {
+            segmentation.keepPoint(event.clientX, event.clientY);
+            event.preventDefault();
+         };
+
+         canvas.onmousemove = function(event) {
+            event.preventDefault();
+            segmentation.tempPoint(event.clientX, event.clientY);
+         };
+
+         canvas.ondblclick = function(event) {
+            event.preventDefault();
+            onDone();
+         };
+
+         canvas.ontouchstart = function(event) {
+            segmentation.keepPoint(event.touches[0].clientX, event.touches[0].clientY);
+            event.preventDefault();
+         };
+
+         canvas.ontouchmove = function(event) {
+            segmentation.keepPoint(event.touches[0].clientX, event.touches[0].clientY);
+            event.preventDefault();
+         };
+
+         canvas.ontouchend = function(event) {
+            event.preventDefault();
+            onDone();
+         };
+      };
+
+
+
+      var setSize = function() {
+         var width = window.innerWidth ||
+                     document.documentElement.clientWidth ||
+                     document.body.clientWidth;
+
+         var height = window.innerHeight ||
+                      document.documentElement.clientHeight ||
+                      document.body.clientHeight;
+
+         var img = document.getElementById('imageCanvas');
+         img.height = height;
+         img.width = width;
+
+         var seg = document.getElementById('segmentCanvas');
+         seg.height = height;
+         seg.width = width;
+      };
+
+
+      window.onload = function() {
+         setSize();
+         document.ontouchmove = function(event) {event.preventDefault();};
+         var segm = new Segmentation("imageCanvas", "segmentCanvas");
+         curr_image = new CurrImage(segm);
+         curr_image.requestImage();
+      };
+
+   </script>
+
+   <style>
+      #imageCanvas {
+         z-index: 0;
+         position: absolute;
+         left: 0;
+         top: 1.5em;
+      }
+
+      #segmentCanvas {
+         z-index: 1;
+         position: absolute;
+         left: 0;
+         top: 1.5em;
+      }
+
+      #imageName {
+         position: absolute;
+         left: 0;
+         top: 0;
+         font-size: 1em;
+         text-align: center;
+         color: red;
+         background-color: yellow;
+         width: 100%;
+         line-height: 2em;
+      }
+
+   </style>
+</head>
+
+<boday>
+   <span id="imageName">NO IMAGE</span>
+   <canvas id="imageCanvas"></canvas>
+   <canvas id="segmentCanvas"></canvas>
+</body>
+
+</html>
